@@ -9,17 +9,35 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen">
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useEffect } = React;
+    const { useState, useEffect, useRef } = React;
 
     const Icon = ({ name, size = 20, className = "" }) => {
       useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [name]);
       return <i data-lucide={name} style={{ width: size, height: size, display: 'inline-block' }} className={className}></i>;
     };
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyAbqlED70Z8wjhdbr_X4lENntHjdRJQdhY",
+      authDomain: "showtime-7f063.firebaseapp.com",
+      projectId: "showtime-7f063",
+      storageBucket: "showtime-7f063.firebasestorage.app",
+      messagingSenderId: "671646207793",
+      appId: "1:671646207793:web:848657c0eaea8e8ab72a10"
+    };
+    let fbAuth = null, fbDb = null;
+    try {
+      firebase.initializeApp(firebaseConfig);
+      fbAuth = firebase.auth();
+      fbDb = firebase.firestore();
+    } catch (e) { console.error('Firebase indisponible', e); }
 
     const IMG = 'https://image.tmdb.org/t/p/';
     const NO_POSTER = "https://images.unsplash.com/photo-1594909122845-11baa439b7bf?w=500&q=80";
@@ -318,6 +336,51 @@
       const [searchResults, setSearchResults] = useState([]);
       const [loading, setLoading] = useState(false);
       const [selectedId, setSelectedId] = useState(null);
+      const [user, setUser] = useState(null);
+      const [syncState, setSyncState] = useState('off');
+      const cloudReady = useRef(false);
+
+      // Connexion + chargement de la liste depuis le cloud
+      useEffect(() => {
+        if (!fbAuth) return;
+        return fbAuth.onAuthStateChanged(async (u) => {
+          setUser(u);
+          cloudReady.current = false;
+          if (!u) { setSyncState('off'); return; }
+          setSyncState('loading');
+          try {
+            const snap = await fbDb.collection('users').doc(u.uid).get();
+            const remote = snap.exists ? JSON.parse(snap.data().data || '[]') : [];
+            const sameDevice = localStorage.getItem('showtime_synced_uid') === u.uid;
+            setShows(prev => sameDevice ? remote : [...remote, ...prev.filter(p => !remote.some(r => r.id === p.id))]);
+            localStorage.setItem('showtime_synced_uid', u.uid);
+            cloudReady.current = true;
+            setSyncState('ok');
+          } catch (e) { console.error(e); setSyncState('error'); }
+        });
+      }, []);
+
+      // Envoi des modifications vers le cloud
+      useEffect(() => {
+        if (!user || !cloudReady.current) return;
+        const t = setTimeout(() => {
+          fbDb.collection('users').doc(user.uid).set({ data: JSON.stringify(shows), updatedAt: Date.now() })
+            .then(() => setSyncState('ok')).catch(() => setSyncState('error'));
+        }, 800);
+        return () => clearTimeout(t);
+      }, [shows, user]);
+
+      const signIn = async () => {
+        try { await fbAuth.signInWithPopup(new firebase.auth.GoogleAuthProvider()); }
+        catch (e) { alert("Connexion impossible : " + (e.code || e.message)); }
+      };
+      const signOut = async () => {
+        if (!confirm("Se déconnecter ? Votre liste reste dans votre compte et sera retirée de cet appareil.")) return;
+        cloudReady.current = false;
+        await fbAuth.signOut();
+        localStorage.removeItem('showtime_synced_uid');
+        setShows([]);
+      };
       const [filter, setFilter] = useState('all');
       const [openMovie, setOpenMovie] = useState(null);
       const [episodesCache, setEpisodesCache] = useState({});
@@ -689,7 +752,7 @@
                 <div className="w-20 h-20 bg-amber-500/20 border border-amber-500/40 rounded-full mx-auto flex items-center justify-center text-amber-400 text-2xl font-bold">ST</div>
                 <div>
                   <h3 className="font-bold text-lg text-slate-100">Mon Compte Showtime</h3>
-                  <p className="text-xs text-slate-400">Sauvegardé sur cet appareil</p>
+                  <p className="text-xs text-slate-400">{user ? 'Synchronisé avec votre compte' : 'Sauvegardé sur cet appareil'}</p>
                 </div>
                 <div className="grid grid-cols-2 gap-3 pt-2">
                   <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
@@ -700,6 +763,24 @@
                     <span className="text-2xl font-bold text-amber-400">{totalSeen}</span>
                     <p className="text-xs text-slate-400 mt-1">Épisodes vus</p></div><div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 col-span-2"><span className="text-2xl font-bold text-amber-400">{moviesSeen}</span><p className="text-xs text-slate-400 mt-1">Films vus</p>
                   </div>
+                </div>
+
+                <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 text-left space-y-2">
+                  <p className="text-sm font-semibold">Compte et synchronisation</p>
+                  {user ? (
+                    <>
+                      <p className="text-xs text-slate-400">Connecté : {user.email}</p>
+                      <p className="text-xs text-amber-300">
+                        {syncState === 'ok' ? '✓ Liste synchronisée' : syncState === 'loading' ? 'Synchronisation…' : syncState === 'error' ? 'Erreur de synchronisation' : ''}
+                      </p>
+                      <button onClick={signOut} className="w-full border border-amber-500/40 text-amber-400 font-bold text-sm rounded-xl py-2.5">Se déconnecter</button>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-xs text-slate-400">Connectez-vous pour retrouver votre liste sur tous vos appareils. Les clés API restent à saisir sur chaque appareil.</p>
+                      <button onClick={signIn} disabled={!fbAuth} className="w-full bg-amber-500 text-slate-950 font-bold text-sm rounded-xl py-2.5">Se connecter avec Google</button>
+                    </>
+                  )}
                 </div>
 
                 <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 text-left space-y-2">
