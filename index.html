@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CinéShowtime - Suivi Séries</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    const Icon = ({ name, size = 20, className = "" }) => {
+      useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [name]);
+      return <i data-lucide={name} style={{ width: size, height: size, display: 'inline-block' }} className={className}></i>;
+    };
+
+    const IMG = 'https://image.tmdb.org/t/p/';
+    const NO_POSTER = "https://images.unsplash.com/photo-1594909122845-11baa439b7bf?w=500&q=80";
+    const posterUrl = (p, size = 'w342') => p ? IMG + size + p : NO_POSTER;
+
+    const looksFrench = (t) => (t.match(/\b(le|la|les|des|est|une|pas|que|pour|dans|très|avec)\b/gi) || []).length >= 4;
+    const decodeHtml = (h) => { const d = document.createElement('textarea'); d.innerHTML = h; return d.value; };
+    const chunkText = (text, max = 400) => {
+      const parts = text.match(/[^.!?\n]+[.!?]*\s*/g) || [text];
+      const out = [];
+      let cur = '';
+      parts.forEach(sn => {
+        while (sn.length > max) { if (cur) { out.push(cur); cur = ''; } out.push(sn.slice(0, max)); sn = sn.slice(max); }
+        if ((cur + sn).length > max) { out.push(cur); cur = sn; } else cur += sn;
+      });
+      if (cur.trim()) out.push(cur);
+      return out.filter(x => x.trim());
+    };
+
+    function Scores({ api, type, id, title, withScores }) {
+      const omdbKey = localStorage.getItem('showtime_omdb_key') || '';
+      const [data, setData] = useState(null);
+      const [alloId, setAlloId] = useState(null);
+
+      useEffect(() => {
+        if (!withScores) return;
+        (async () => {
+          let ext = {};
+          try { ext = await api(`/${type}/${id}/external_ids`); } catch (e) {}
+          if (omdbKey) {
+            try {
+              const d = ext.imdb_id ? await fetch(`https://www.omdbapi.com/?i=${ext.imdb_id}&apikey=${omdbKey}`).then(r => r.json()) : null;
+              setData(d && d.Response !== 'False' ? d : false);
+            } catch (e) { setData(false); }
+          }
+          // Lien direct Allociné via Wikidata (si l'identifiant existe)
+          try {
+            if (ext.wikidata_id) {
+              const prop = type === 'movie' ? 'P1265' : 'P1267';
+              const w = await fetch(`https://www.wikidata.org/w/api.php?action=wbgetclaims&entity=${ext.wikidata_id}&property=${prop}&format=json&origin=*`).then(r => r.json());
+              const v = w.claims?.[prop]?.[0]?.mainsnak?.datavalue?.value;
+              if (v) setAlloId(v);
+            }
+          } catch (e) {}
+        })();
+      }, [id]);
+
+      const q = encodeURIComponent(title);
+      const allocineUrl = alloId
+        ? (type === 'movie' ? `https://www.allocine.fr/film/fichefilm_gen_cfilm=${alloId}.html` : `https://www.allocine.fr/series/ficheserie_gen_cserie=${alloId}.html`)
+        : `https://www.allocine.fr/rechercher/?q=${q}`;
+      const scUrl = `https://duckduckgo.com/?q=!ducky+${q}+${type === 'movie' ? 'film' : 'série'}+site:senscritique.com`;
+      const link = "text-[11px] font-semibold text-amber-400 border border-amber-500/30 rounded-lg px-2 py-1";
+      return (
+        <div className="mt-1.5 space-y-2">
+          {withScores && data && data.Ratings && data.Ratings.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {data.Ratings.map(r => (
+                <span key={r.Source} className="text-[11px] bg-slate-800 text-slate-200 rounded-lg px-2 py-1">
+                  {r.Source === 'Internet Movie Database' ? 'IMDb' : r.Source} <b className="text-amber-300">{r.Value}</b>
+                </span>
+              ))}
+            </div>
+          )}
+          {withScores && !omdbKey && (
+            <p className="text-[10px] text-slate-600">Ajoutez une clé OMDb dans Profil pour voir les notes IMDb, Rotten Tomatoes et Metacritic.</p>
+          )}
+          {withScores && omdbKey && data === false && (
+            <p className="text-[10px] text-slate-600">Notes OMDb indisponibles pour ce titre.</p>
+          )}
+          <div className="flex flex-wrap gap-1.5">
+            <a href={allocineUrl} target="_blank" rel="noopener noreferrer" className={link}>Voir sur Allociné ↗</a>
+            <a href={scUrl} target="_blank" rel="noopener noreferrer" className={link}>Voir sur SensCritique ↗</a>
+          </div>
+        </div>
+      );
+    }
+
+    function Reviews({ api, type, id }) {
+      const [open, setOpen] = useState(false);
+      const [list, setList] = useState(null);
+      const [err, setErr] = useState(false);
+      const [full, setFull] = useState({});
+      const [tr, setTr] = useState({});
+
+      const translateReview = async (r, text) => {
+        const cur = tr[r.id];
+        if (cur && cur.text) { setTr(t => ({ ...t, [r.id]: { ...cur, show: !cur.show } })); return; }
+        setTr(t => ({ ...t, [r.id]: { loading: true } }));
+        try {
+          const out = [];
+          for (const c of chunkText(text.slice(0, 1500))) {
+            const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(c)}&langpair=en|fr`).then(x => x.json());
+            if (String(res.responseStatus) !== '200') throw new Error('quota');
+            out.push(decodeHtml(res.responseData.translatedText));
+          }
+          setTr(t => ({ ...t, [r.id]: { text: out.join(' '), show: true } }));
+        } catch (e) { setTr(t => ({ ...t, [r.id]: { err: true } })); }
+      };
+
+      const toggle = async () => {
+        const next = !open;
+        setOpen(next);
+        if (next && list === null) {
+          try {
+            const [fr, all] = await Promise.all([
+              api(`/${type}/${id}/reviews`, { language: 'fr-FR' }).catch(() => ({ results: [] })),
+              api(`/${type}/${id}/reviews`)
+            ]);
+            const seen = new Set();
+            setList([...fr.results, ...all.results].filter(r => !seen.has(r.id) && seen.add(r.id)).slice(0, 8));
+          } catch (e) { setErr(true); setList([]); }
+        }
+      };
+
+      return (
+        <div className="mt-1.5">
+          <button onClick={toggle} className="text-xs font-semibold text-amber-400 underline">
+            {open ? 'Masquer les avis' : '★ Voir les avis'}
+          </button>
+          {open && (
+            <div className="mt-2 space-y-2">
+              {list === null && <p className="text-xs text-slate-500">Chargement des avis...</p>}
+              {err && <p className="text-xs text-rose-400">Impossible de charger les avis.</p>}
+              {list && !err && list.length === 0 && <p className="text-xs text-slate-500">Aucun avis pour le moment.</p>}
+              {list && list.map(r => {
+                const text = (r.content || '').replace(/\*\*/g, '').trim();
+                const long = text.length > 350;
+                const shown = long && !full[r.id] ? text.slice(0, 350) + '…' : text;
+                const t = tr[r.id] || {};
+                const display = t.show ? t.text : shown;
+                return (
+                  <div key={r.id} className="bg-slate-950/60 border border-slate-800 rounded-lg p-2.5">
+                    <div className="flex justify-between text-[11px] text-slate-400 font-semibold">
+                      <span className="truncate">{r.author}</span>
+                      <span className="shrink-0 ml-2 text-amber-300">{r.author_details?.rating ? `★ ${r.author_details.rating}/10` : ''}</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-1 leading-relaxed whitespace-pre-line">{display}</p>
+                    <div className="flex gap-3 mt-1 items-center">
+                      {long && (
+                        <button onClick={() => { setFull(f => ({ ...f, [r.id]: !f[r.id] })); setTr(x => { const n = { ...x }; delete n[r.id]; return n; }); }} className="text-[11px] text-amber-400">
+                          {full[r.id] ? 'Réduire' : 'Lire la suite'}
+                        </button>
+                      )}
+                      {!looksFrench(text) && (
+                        <button onClick={() => translateReview(r, shown.replace(/…$/, ''))} disabled={t.loading} className="text-[11px] text-amber-400">
+                          {t.loading ? 'Traduction…' : t.show ? "Voir l'original" : 'Traduire en français'}
+                        </button>
+                      )}
+                    </div>
+                    {t.show && <p className="text-[10px] text-slate-600">Traduction automatique (MyMemory), approximative.</p>}
+                    {t.err && <p className="text-[10px] text-rose-400">Traduction indisponible (limite quotidienne atteinte ?).</p>}
+                  </div>
+                );
+              })}
+              {list && list.length > 0 && <p className="text-[10px] text-slate-600">Avis des utilisateurs TMDB, souvent rédigés en anglais.</p>}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function ShowDetail({ show, episodes, loading, error, onBack, onToggle, onToggleSeason, api }) {
+      const [season, setSeason] = useState(null);
+      const [open, setOpen] = useState(null);
+      const seasons = [...new Set(episodes.map(e => e.season))];
+      const current = season ?? seasons[0];
+      const watched = new Set(show.watchedIds || []);
+      const list = episodes.filter(e => e.season === current);
+      const allSeen = list.length > 0 && list.every(e => watched.has(e.id));
+
+      return (
+        <div className="space-y-4">
+          <button onClick={onBack} className="text-sm text-amber-400 font-semibold">← Retour</button>
+          <div className="flex gap-3">
+            <img src={show.poster} alt={show.title} className="w-24 h-36 object-cover rounded-xl bg-slate-800 shrink-0" />
+            <div>
+              <h2 className="font-bold text-lg">{show.title}</h2>
+              <p className="text-xs text-slate-400 mt-0.5">{show.genre} • ★ {show.rating}</p>
+              <p className="text-xs text-amber-300 mt-2">{show.watchedEpisodes} / {show.totalEpisodes} ép. vus</p>
+              {show.summary && <p className="text-[11px] text-slate-500 mt-1 line-clamp-4">{show.summary}</p>}
+            </div>
+          </div>
+
+          <Scores api={api} type="tv" id={show.id} title={show.title} withScores={true} />
+          <Reviews api={api} type="tv" id={show.id} />
+
+          {loading && <p className="text-center text-slate-400 py-6 text-sm">Chargement des épisodes...</p>}
+          {error && <p className="text-center text-rose-400 py-6 text-sm">Impossible de charger les épisodes (vérifiez votre clé dans Profil).</p>}
+
+          {!loading && !error && (
+            <>
+              <div className="flex gap-2 overflow-x-auto pb-1">
+                {seasons.map(n => (
+                  <button key={n} onClick={() => setSeason(n)}
+                    className={`shrink-0 text-xs font-bold px-3 py-1.5 rounded-full border ${n === current ? 'bg-amber-500 text-slate-950 border-amber-500' : 'text-slate-400 border-slate-700'}`}>
+                    Saison {n}
+                  </button>
+                ))}
+              </div>
+              <button onClick={() => onToggleSeason(current)} className="text-xs text-amber-400 underline">
+                {allSeen ? 'Tout marquer comme non vu' : 'Marquer toute la saison comme vue'}
+              </button>
+
+              <div className="space-y-2">
+                {list.map(ep => {
+                  const seen = watched.has(ep.id);
+                  const isOpen = open === ep.id;
+                  return (
+                    <div key={ep.id} className="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
+                      <div className="flex items-center gap-3">
+                        <div className="flex-grow cursor-pointer min-w-0" onClick={() => setOpen(isOpen ? null : ep.id)}>
+                          <p className="text-sm font-semibold truncate">{ep.number}. {ep.name}</p>
+                          <p className="text-[11px] text-slate-500">{ep.airdate || 'Date N/C'}{ep.runtime ? ` • ${ep.runtime} min` : ''}</p>
+                        </div>
+                        <button onClick={() => onToggle(ep)}
+                          className={`w-8 h-8 rounded-lg border text-sm font-bold shrink-0 ${seen ? 'bg-amber-500 text-slate-950 border-amber-500' : 'border-slate-600 text-slate-600'}`}>
+                          ✓
+                        </button>
+                      </div>
+                      {isOpen && (
+                        <div className="mt-2">
+                          {ep.still && <img src={ep.still} alt="" className="w-full rounded-lg mb-2 bg-slate-800" />}
+                          <p className="text-xs text-slate-400 leading-relaxed">{ep.summary || 'Pas de résumé disponible.'}</p>
+                          {ep.summaryEn && <p className="text-[10px] text-slate-600 mt-1">Résumé non disponible en français (version anglaise).</p>}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    function MovieDetail({ show, api, onBack, onToggle }) {
+      const [info, setInfo] = useState(null);
+      useEffect(() => {
+        api(`/movie/${String(show.id).slice(1)}`, { language: 'fr-FR', append_to_response: 'credits' })
+          .then(setInfo).catch(() => setInfo(false));
+      }, [show.id]);
+
+      const director = info?.credits?.crew?.find(c => c.job === 'Director')?.name;
+      const cast = info?.credits?.cast?.slice(0, 6).map(c => c.name).join(', ');
+
+      return (
+        <div className="space-y-4">
+          <button onClick={onBack} className="text-sm text-amber-400 font-semibold">← Retour</button>
+          <div className="flex gap-3">
+            <img src={show.poster} alt={show.title} className="w-28 h-40 object-cover rounded-xl bg-slate-800 shrink-0" />
+            <div className="min-w-0">
+              <h2 className="font-bold text-lg">{show.title}</h2>
+              <p className="text-xs text-slate-400 mt-0.5">{show.year}{show.runtime ? ` • ${show.runtime} min` : ''} • ★ {show.rating}</p>
+              <p className="text-xs text-slate-500 mt-0.5">{show.genre}</p>
+              {info?.tagline && <p className="text-xs italic text-amber-200/80 mt-2">{info.tagline}</p>}
+              <button onClick={() => onToggle(show.id)}
+                className={`mt-3 text-xs font-bold px-3 py-2 rounded-xl border ${show.seen ? 'bg-amber-500 text-slate-950 border-amber-500' : 'border-slate-600 text-slate-300'}`}>
+                {show.seen ? '✓ Film vu' : 'Marquer comme vu'}
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Synopsis</h3>
+            <p className="text-sm text-slate-300 leading-relaxed">{show.summary || 'Pas de synopsis disponible.'}</p>
+          </div>
+
+          {info === null && <p className="text-xs text-slate-500">Chargement des détails...</p>}
+          {(director || cast) && (
+            <div className="space-y-2 text-sm">
+              {director && <p><span className="text-slate-500">Réalisation : </span>{director}</p>}
+              {cast && <p><span className="text-slate-500">Avec : </span>{cast}</p>}
+            </div>
+          )}
+
+          <Scores api={api} type="movie" id={String(show.id).slice(1)} title={show.title} withScores={true} />
+          <Reviews api={api} type="movie" id={String(show.id).slice(1)} />
+        </div>
+      );
+    }
+
+    function App() {
+      const [shows, setShows] = useState(() => {
+        const saved = localStorage.getItem('showtime_shows_tmdb');
+        return saved ? JSON.parse(saved) : [];
+      });
+      const [apiKey, setApiKey] = useState(() => localStorage.getItem('showtime_tmdb_key') || '');
+      const [keyInput, setKeyInput] = useState('');
+      const [omdbInput, setOmdbInput] = useState('');
+      const [exportKeys, setExportKeys] = useState(false);
+      const [activeTab, setActiveTab] = useState('watchlist');
+      const [searchQuery, setSearchQuery] = useState('');
+      const [dbQuery, setDbQuery] = useState('');
+      const [searchResults, setSearchResults] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const [selectedId, setSelectedId] = useState(null);
+      const [filter, setFilter] = useState('all');
+      const [openMovie, setOpenMovie] = useState(null);
+      const [episodesCache, setEpisodesCache] = useState({});
+      const [epLoading, setEpLoading] = useState(false);
+      const [epError, setEpError] = useState(false);
+
+      useEffect(() => {
+        localStorage.setItem('showtime_shows_tmdb', JSON.stringify(shows));
+      }, [shows]);
+
+      // Appel TMDB (clé v3 ou jeton v4 acceptés)
+      const api = async (path, params = {}) => {
+        const url = new URL('https://api.themoviedb.org/3' + path);
+        Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+        const headers = {};
+        if (apiKey.startsWith('eyJ')) headers.Authorization = 'Bearer ' + apiKey;
+        else url.searchParams.set('api_key', apiKey);
+        const res = await fetch(url, { headers });
+        if (!res.ok) throw new Error(res.status);
+        return res.json();
+      };
+
+      const buildShow = async (id, watched = 0) => {
+        const d = await api(`/tv/${id}`, { language: 'fr-FR' });
+        return {
+          id: d.id,
+          title: d.name,
+          poster: posterUrl(d.poster_path),
+          rating: d.vote_average ? d.vote_average.toFixed(1) : 'N/A',
+          totalEpisodes: d.number_of_episodes || 0,
+          watchedEpisodes: watched,
+          nextEpisode: `Épisode ${watched + 1}`,
+          genre: d.genres?.map(g => g.name).join(' / ') || 'Série TV',
+          summary: d.overview || ''
+        };
+      };
+
+      // Migration des anciennes séries (TVmaze) vers TMDB, une seule fois
+      useEffect(() => {
+        if (!apiKey) return;
+        const old = localStorage.getItem('showtime_shows');
+        if (!old || localStorage.getItem('showtime_migrated')) return;
+        (async () => {
+          const out = [];
+          for (const o of JSON.parse(old)) {
+            try {
+              const r = await api('/search/tv', { query: o.title, language: 'fr-FR' });
+              if (r.results[0]) out.push(await buildShow(r.results[0].id, o.watchedEpisodes || 0));
+            } catch (e) {}
+          }
+          localStorage.setItem('showtime_migrated', '1');
+          setShows(prev => [...out.filter(n => !prev.some(p => p.id === n.id)), ...prev]);
+        })();
+      }, [apiKey]);
+
+      // Recherche
+      useEffect(() => {
+        if (!dbQuery.trim() || !apiKey) { setSearchResults([]); return; }
+        const t = setTimeout(async () => {
+          setLoading(true);
+          try {
+            const r = await api('/search/multi', { query: dbQuery, language: 'fr-FR' });
+            setSearchResults((r.results || []).filter(x => x.media_type === 'tv' || x.media_type === 'movie'));
+          } catch (e) { setSearchResults([]); }
+          setLoading(false);
+        }, 300);
+        return () => clearTimeout(t);
+      }, [dbQuery, apiKey]);
+
+      // Épisodes (français, avec repli sur l'anglais si le résumé manque)
+      const loadEpisodes = async (id) => {
+        if (episodesCache[id]) return episodesCache[id];
+        const d = await api(`/tv/${id}`, { language: 'fr-FR' });
+        const nums = d.seasons.filter(s => s.season_number > 0).map(s => s.season_number);
+        const all = await Promise.all(nums.map(async n => {
+          const [fr, en] = await Promise.all([
+            api(`/tv/${id}/season/${n}`, { language: 'fr-FR' }),
+            api(`/tv/${id}/season/${n}`, { language: 'en-US' }).catch(() => ({ episodes: [] }))
+          ]);
+          return fr.episodes.map(e => {
+            const eng = en.episodes.find(x => x.id === e.id);
+            return {
+              id: e.id, season: n, number: e.episode_number,
+              name: e.name, airdate: e.air_date, runtime: e.runtime,
+              still: e.still_path ? IMG + 'w300' + e.still_path : null,
+              summary: e.overview || eng?.overview || '',
+              summaryEn: !e.overview && !!eng?.overview
+            };
+          });
+        }));
+        const eps = all.flat();
+        setEpisodesCache(c => ({ ...c, [id]: eps }));
+        return eps;
+      };
+
+      useEffect(() => {
+        if (selectedId == null || typeof selectedId === 'string') return;
+        setEpError(false);
+        setEpLoading(true);
+        loadEpisodes(selectedId).catch(() => setEpError(true)).finally(() => setEpLoading(false));
+      }, [selectedId]);
+
+      const currentIds = (show, eps) => show.watchedIds ?? eps.slice(0, show.watchedEpisodes).map(e => e.id);
+
+      const saveWatched = (showId, ids, eps) => {
+        const set = new Set(ids);
+        const next = eps.find(e => !set.has(e.id));
+        setShows(prev => prev.map(s => s.id !== showId ? s : {
+          ...s, watchedIds: ids, watchedEpisodes: ids.length, totalEpisodes: eps.length,
+          nextEpisode: next ? `S${next.season} E${next.number} : ${next.name}` : null
+        }));
+      };
+
+      const toggleEpisode = (ep) => {
+        const show = shows.find(s => s.id === selectedId);
+        const eps = episodesCache[selectedId];
+        const ids = currentIds(show, eps);
+        saveWatched(show.id, ids.includes(ep.id) ? ids.filter(i => i !== ep.id) : [...ids, ep.id], eps);
+      };
+
+      const toggleSeason = (n) => {
+        const show = shows.find(s => s.id === selectedId);
+        const eps = episodesCache[selectedId];
+        const ids = currentIds(show, eps);
+        const sIds = eps.filter(e => e.season === n).map(e => e.id);
+        const all = sIds.every(i => ids.includes(i));
+        const rest = ids.filter(i => !sIds.includes(i));
+        saveWatched(show.id, all ? rest : [...rest, ...sIds], eps);
+      };
+
+      const markNextEpisodeWatched = async (showId) => {
+        const show = shows.find(s => s.id === showId);
+        try {
+          const eps = await loadEpisodes(showId);
+          const ids = currentIds(show, eps);
+          const next = eps.find(e => !ids.includes(e.id));
+          if (next) saveWatched(showId, [...ids, next.id], eps);
+        } catch (e) { alert("Impossible de charger les épisodes."); }
+      };
+
+      const buildMovie = async (id) => {
+        const d = await api(`/movie/${id}`, { language: 'fr-FR' });
+        return {
+          id: 'm' + d.id, type: 'movie', title: d.title, poster: posterUrl(d.poster_path),
+          rating: d.vote_average ? d.vote_average.toFixed(1) : 'N/A',
+          genre: d.genres?.map(g => g.name).join(' / ') || 'Film',
+          summary: d.overview || '', year: (d.release_date || '').split('-')[0],
+          runtime: d.runtime, seen: false
+        };
+      };
+
+      const addItem = async (item) => {
+        const isMovie = item.media_type === 'movie';
+        const key = isMovie ? 'm' + item.id : item.id;
+        if (shows.some(s => s.id === key)) { alert("Déjà dans votre bibliothèque !"); return; }
+        try {
+          let s;
+          if (isMovie) s = await buildMovie(item.id);
+          else { s = await buildShow(item.id); s.watchedIds = []; s.nextEpisode = 'S1 E1'; }
+          setShows(prev => [s, ...prev]);
+          setActiveTab(isMovie ? 'movies' : 'watchlist');
+        } catch (e) { alert("Erreur lors de l'ajout."); }
+      };
+
+      const toggleMovie = (id) => setShows(prev => prev.map(s => s.id === id ? { ...s, seen: !s.seen } : s));
+
+      const removeShow = (id) => {
+        setShows(shows.filter(s => s.id !== id));
+        if (selectedId === id) setSelectedId(null);
+      };
+
+      const saveKey = () => {
+        const k = keyInput.trim();
+        if (!k) return;
+        localStorage.setItem('showtime_tmdb_key', k);
+        setApiKey(k);
+        setKeyInput('');
+      };
+
+      const exportData = () => {
+        const blob = new Blob([JSON.stringify({ app: 'showtime', version: 1, shows, ...(exportKeys ? { keys: { tmdb: apiKey, omdb: localStorage.getItem('showtime_omdb_key') || '' } } : {}) }, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `showtime-sauvegarde-${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      };
+
+      const importData = (e) => {
+        const file = e.target.files[0];
+        e.target.value = '';
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const data = JSON.parse(reader.result);
+            const list = Array.isArray(data) ? data : data.shows;
+            if (!Array.isArray(list) || !list.every(x => x && x.id != null && x.title)) throw new Error('format');
+            if (!confirm(`Importer ${list.length} titre(s) ? Ceux déjà présents seront mis à jour avec la sauvegarde.`)) return;
+            setShows(prev => [...list, ...prev.filter(p => !list.some(n => n.id === p.id))]);
+            const k = !Array.isArray(data) && data.keys;
+            if (k) {
+              if (k.tmdb) { localStorage.setItem('showtime_tmdb_key', k.tmdb); setApiKey(k.tmdb); }
+              if (k.omdb) localStorage.setItem('showtime_omdb_key', k.omdb);
+            }
+            alert('Sauvegarde importée !' + (k ? ' Vos clés API ont aussi été restaurées.' : ''));
+          } catch (err) { alert("Fichier invalide : ce n'est pas une sauvegarde Showtime."); }
+        };
+        reader.readAsText(file);
+      };
+
+      const goTab = (t) => { setSelectedId(null); setSearchQuery(''); setActiveTab(t); };
+      const filteredShows = shows.filter(s => s.title.toLowerCase().includes(searchQuery.toLowerCase()) && ((activeTab === 'movies') === (s.type === 'movie')));
+      const tvShows = shows.filter(s => s.type !== 'movie');
+      const totalSeen = tvShows.reduce((acc, s) => acc + s.watchedEpisodes, 0);
+      const moviesSeen = shows.filter(s => s.type === 'movie' && s.seen).length;
+
+      return (
+        <div className="max-w-md mx-auto min-h-screen pb-24 bg-slate-950 text-slate-100 shadow-2xl relative border-x border-slate-900">
+
+          <header className="p-4 bg-slate-900/80 backdrop-blur-md sticky top-0 z-50 border-b border-slate-800 flex justify-between items-center">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-amber-500 flex items-center justify-center font-bold text-slate-950">ST</div>
+              <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-amber-400 to-amber-200 bg-clip-text text-transparent">Showtime</h1>
+            </div>
+            <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">{totalSeen} ép. vus</span>
+          </header>
+
+          <main className="p-4">
+
+            {selectedId != null && shows.find(x => x.id === selectedId)?.type === 'movie' && (
+              <MovieDetail
+                show={shows.find(x => x.id === selectedId)}
+                api={api}
+                onBack={() => setSelectedId(null)}
+                onToggle={toggleMovie}
+              />
+            )}
+
+            {selectedId != null && shows.find(x => x.id === selectedId) && shows.find(x => x.id === selectedId).type !== 'movie' && (
+              <ShowDetail
+                show={shows.find(x => x.id === selectedId)}
+                episodes={episodesCache[selectedId] || []}
+                loading={epLoading}
+                error={epError}
+                onBack={() => setSelectedId(null)}
+                onToggle={toggleEpisode}
+                onToggleSeason={toggleSeason}
+                api={api}
+              />
+            )}
+
+            {selectedId == null && !apiKey && activeTab !== 'profile' && (
+              <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-xs text-amber-300 mb-4">
+                Ajoutez votre clé TMDB dans l'onglet <b>Profil</b> pour activer la recherche et les épisodes en français.
+              </div>
+            )}
+
+            {selectedId == null && (activeTab === 'watchlist' || activeTab === 'movies') && (
+              <div className="space-y-4">
+                <div className="relative">
+                  <input type="text" placeholder={activeTab === 'movies' ? "Filtrer vos films enregistrés..." : "Filtrer vos séries enregistrées..."} value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full bg-slate-900 text-slate-200 text-sm rounded-xl pl-10 pr-4 py-3 border border-slate-800 focus:outline-none focus:border-amber-500/50" />
+                  <span className="absolute left-3.5 top-3.5 text-slate-500"><Icon name="search" size={18} /></span>
+                </div>
+
+                <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider pt-2">{activeTab === 'movies' ? 'Vos films' : 'Vos séries'}</h2>
+
+                {filteredShows.length === 0 ? (
+                  <p className="text-center text-slate-500 py-10 text-sm">Rien d'enregistré. Allez dans l'onglet "Découvrir" !</p>
+                ) : (
+                  filteredShows.map(show => {
+                    if (show.type === 'movie') return (
+                      <div key={show.id} className="bg-slate-900/60 rounded-2xl border border-slate-800/80 flex gap-3 p-3">
+                        <img src={show.poster} alt={show.title} onClick={() => setSelectedId(show.id)} className="w-20 h-28 object-cover rounded-xl shadow-md shrink-0 bg-slate-800 cursor-pointer" />
+                        <div className="flex-grow min-w-0">
+                          <div className="flex justify-between items-start gap-1">
+                            <h3 onClick={() => setSelectedId(show.id)} className="font-bold text-slate-100 line-clamp-1 cursor-pointer hover:text-amber-300">{show.title}</h3>
+                            <button onClick={() => removeShow(show.id)} className="text-slate-600 hover:text-rose-400 text-xs p-1">✕</button>
+                          </div>
+                          <p className="text-xs text-slate-400 mt-0.5">Film • {show.year}{show.runtime ? ` • ${show.runtime} min` : ''} • ★ {show.rating}</p>
+                          <p className="text-[11px] text-slate-500 mt-0.5 line-clamp-1">{show.genre}</p>
+                          <p className={`text-[11px] text-slate-400 mt-1.5 ${openMovie === show.id ? '' : 'line-clamp-3'}`}>{show.summary || 'Pas de synopsis.'}</p>
+                        </div>
+                        <button onClick={() => toggleMovie(show.id)} title="Marquer comme vu"
+                          className={`self-center w-10 h-10 rounded-xl border font-bold shrink-0 ${show.seen ? 'bg-amber-500 text-slate-950 border-amber-500' : 'border-slate-600 text-slate-600'}`}>✓</button>
+                      </div>
+                    );
+                    const progress = show.totalEpisodes ? Math.round((show.watchedEpisodes / show.totalEpisodes) * 100) : 0;
+                    return (
+                      <div key={show.id} className="bg-slate-900/60 rounded-2xl border border-slate-800/80 overflow-hidden flex gap-3 p-3 relative group">
+                        <img src={show.poster} alt={show.title} onClick={() => setSelectedId(show.id)}
+                          className="w-20 h-28 object-cover rounded-xl shadow-md shrink-0 bg-slate-800 cursor-pointer" />
+
+                        <div className="flex flex-col justify-between flex-grow py-0.5 min-w-0">
+                          <div>
+                            <div className="flex justify-between items-start gap-1">
+                              <h3 onClick={() => setSelectedId(show.id)} className="font-bold text-slate-100 line-clamp-1 cursor-pointer hover:text-amber-300">{show.title}</h3>
+                              <button onClick={() => removeShow(show.id)} className="text-slate-600 hover:text-rose-400 text-xs p-1">✕</button>
+                            </div>
+                            <p className="text-xs text-slate-400 mt-0.5 line-clamp-1">{show.genre} • ★ {show.rating}</p>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <div className="text-xs font-medium text-amber-300 line-clamp-1">Suivant : {show.nextEpisode || "À jour !"}</div>
+                            <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                              <div className="bg-amber-500 h-full rounded-full transition-all duration-300" style={{ width: `${progress}%` }}></div>
+                            </div>
+                            <div className="flex justify-between items-center text-[11px] text-slate-500 font-medium">
+                              <span>{show.watchedEpisodes} / {show.totalEpisodes} ép.</span>
+                              <span>{progress}%</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {show.watchedEpisodes < show.totalEpisodes && (
+                          <button onClick={() => markNextEpisodeWatched(show.id)}
+                            className="self-center bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold p-2.5 rounded-xl shadow-lg transition-transform active:scale-95"
+                            title="Marquer l'épisode comme vu">
+                            <Icon name="check" size={18} />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
+
+            {selectedId == null && activeTab === 'discover' && (
+              <div className="space-y-4">
+                <div className="relative">
+                  <input type="text" placeholder="Série ou film (ex: Breaking Bad, Inception)..." value={dbQuery}
+                    onChange={(e) => setDbQuery(e.target.value)}
+                    className="w-full bg-slate-900 text-slate-200 text-sm rounded-xl pl-10 pr-4 py-3 border border-amber-500/40 focus:outline-none focus:border-amber-500" autoFocus />
+                  <span className="absolute left-3.5 top-3.5 text-amber-500"><Icon name="globe" size={18} /></span>
+                </div>
+
+                {loading && <p className="text-center text-slate-400 py-6 text-sm">Recherche en cours...</p>}
+
+                <div className="space-y-3 pt-2">
+                  {searchResults.map(show => (
+                    <div key={show.id} className="bg-slate-900/80 rounded-2xl border border-slate-800 p-3 flex gap-3 items-center justify-between">
+                      <div className="flex gap-3 items-center flex-grow overflow-hidden">
+                        <img src={posterUrl(show.poster_path, 'w185')} alt={show.name || show.title} className="w-14 h-20 object-cover rounded-lg bg-slate-800 shrink-0" />
+                        <div className="overflow-hidden">
+                          <h4 className="font-bold text-sm text-slate-100 truncate">{show.name || show.title} <span className="text-[10px] font-semibold text-amber-400 border border-amber-500/30 rounded px-1 ml-1">{show.media_type === 'movie' ? 'Film' : 'Série'}</span></h4>
+                          <p className="text-xs text-slate-400 mt-0.5">
+                            {(show.first_air_date || show.release_date || '').split('-')[0] || 'Année N/C'} • ★ {show.vote_average ? show.vote_average.toFixed(1) : 'N/A'}
+                          </p>
+                          <p className="text-[11px] text-slate-500 line-clamp-2 mt-1 pr-2">{show.overview || 'Pas de description.'}</p>
+                          <Scores api={api} type={show.media_type} id={show.id} title={show.name || show.title} withScores={false} />
+                          <Reviews api={api} type={show.media_type} id={show.id} />
+                        </div>
+                      </div>
+                      <button onClick={() => addItem(show)}
+                        className="bg-amber-500/10 hover:bg-amber-500 hover:text-slate-950 text-amber-400 border border-amber-500/30 text-xs font-bold px-3 py-2 rounded-xl transition-all shrink-0">
+                        + Ajouter
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {selectedId == null && activeTab === 'profile' && (
+              <div className="space-y-6 pt-4 text-center">
+                <div className="w-20 h-20 bg-amber-500/20 border border-amber-500/40 rounded-full mx-auto flex items-center justify-center text-amber-400 text-2xl font-bold">ST</div>
+                <div>
+                  <h3 className="font-bold text-lg text-slate-100">Mon Compte Showtime</h3>
+                  <p className="text-xs text-slate-400">Sauvegardé sur cet appareil</p>
+                </div>
+                <div className="grid grid-cols-2 gap-3 pt-2">
+                  <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
+                    <span className="text-2xl font-bold text-amber-400">{tvShows.length}</span>
+                    <p className="text-xs text-slate-400 mt-1">Séries suivies</p>
+                  </div>
+                  <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
+                    <span className="text-2xl font-bold text-amber-400">{totalSeen}</span>
+                    <p className="text-xs text-slate-400 mt-1">Épisodes vus</p></div><div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 col-span-2"><span className="text-2xl font-bold text-amber-400">{moviesSeen}</span><p className="text-xs text-slate-400 mt-1">Films vus</p>
+                  </div>
+                </div>
+
+                <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 text-left space-y-2">
+                  <p className="text-sm font-semibold">Clé API TMDB</p>
+                  <p className="text-xs text-slate-400">
+                    {apiKey ? `Clé enregistrée (${apiKey.slice(0, 4)}…). Collez-en une autre pour la remplacer.` : "Collez ici votre clé (ou jeton d'accès) TMDB."}
+                  </p>
+                  <input type="password" value={keyInput} onChange={(e) => setKeyInput(e.target.value)} placeholder="Clé API"
+                    className="w-full bg-slate-950 text-slate-200 text-sm rounded-xl px-3 py-2.5 border border-slate-800 focus:outline-none focus:border-amber-500/50" />
+                  <button onClick={saveKey} className="w-full bg-amber-500 text-slate-950 font-bold text-sm rounded-xl py-2.5">Enregistrer</button>
+                </div>
+
+                <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 text-left space-y-2">
+                  <p className="text-sm font-semibold">Clé API OMDb (optionnelle)</p>
+                  <p className="text-xs text-slate-400">
+                    {localStorage.getItem('showtime_omdb_key') ? 'Clé enregistrée.' : "Gratuite sur omdbapi.com/apikey.aspx. Affiche les notes IMDb, Rotten Tomatoes et Metacritic."}
+                  </p>
+                  <input type="password" value={omdbInput} onChange={(e) => setOmdbInput(e.target.value)} placeholder="Clé OMDb"
+                    className="w-full bg-slate-950 text-slate-200 text-sm rounded-xl px-3 py-2.5 border border-slate-800 focus:outline-none focus:border-amber-500/50" />
+                  <button onClick={() => { if (omdbInput.trim()) { localStorage.setItem('showtime_omdb_key', omdbInput.trim()); setOmdbInput(''); } }}
+                    className="w-full bg-amber-500 text-slate-950 font-bold text-sm rounded-xl py-2.5">Enregistrer</button>
+                </div>
+
+                <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 text-left space-y-2">
+                  <p className="text-sm font-semibold">Sauvegarde</p>
+                  <p className="text-xs text-slate-400">Exportez votre bibliothèque dans un fichier pour la transférer sur un autre appareil ou la conserver. Les clés API ne sont incluses que si vous cochez la case ci-dessous.</p>
+                  <label className="flex items-start gap-2 text-xs text-slate-300 cursor-pointer">
+                    <input type="checkbox" checked={exportKeys} onChange={(e) => setExportKeys(e.target.checked)} className="mt-0.5" />
+                    <span>Inclure mes clés API (TMDB et OMDb). Le fichier contiendra alors des informations privées : ne le partagez pas.</span>
+                  </label>
+                  <button onClick={exportData} className="w-full bg-amber-500 text-slate-950 font-bold text-sm rounded-xl py-2.5">Exporter ma bibliothèque</button>
+                  <label className="block w-full text-center border border-amber-500/40 text-amber-400 font-bold text-sm rounded-xl py-2.5 cursor-pointer">
+                    Importer une sauvegarde
+                    <input type="file" accept="application/json,.json" onChange={importData} className="hidden" />
+                  </label>
+                </div>
+              </div>
+            )}
+
+          </main>
+
+          <nav className="fixed bottom-0 max-w-md w-full bg-slate-900/95 backdrop-blur-lg border-t border-slate-800 flex justify-around py-3 z-50">
+            <button onClick={() => goTab('watchlist')} className={`flex flex-col items-center gap-1 text-xs font-medium ${activeTab === 'watchlist' ? 'text-amber-400' : 'text-slate-500'}`}>
+              <Icon name="tv" size={20} /><span>Séries</span>
+            </button>
+            <button onClick={() => goTab('movies')} className={`flex flex-col items-center gap-1 text-xs font-medium ${activeTab === 'movies' ? 'text-amber-400' : 'text-slate-500'}`}>
+              <Icon name="film" size={20} /><span>Films</span>
+            </button>
+            <button onClick={() => goTab('discover')} className={`flex flex-col items-center gap-1 text-xs font-medium ${activeTab === 'discover' ? 'text-amber-400' : 'text-slate-500'}`}>
+              <Icon name="compass" size={20} /><span>Découvrir</span>
+            </button>
+            <button onClick={() => goTab('profile')} className={`flex flex-col items-center gap-1 text-xs font-medium ${activeTab === 'profile' ? 'text-amber-400' : 'text-slate-500'}`}>
+              <Icon name="user" size={20} /><span>Profil</span>
+            </button>
+          </nav>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
